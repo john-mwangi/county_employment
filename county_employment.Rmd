@@ -1,0 +1,179 @@
+---
+title: "MSA Job Creation"
+author: "John Mwangi"
+date: "10/26/2021"
+output: html_document
+---
+
+# Objective
+
+Time series model for determining number of job opportinities in Mombasa County
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Packages required
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(readxl)
+library(forecast)
+```
+
+# Data importation
+
+## KE Business Registrations
+
+```{r}
+ke_business_reg <-
+read_excel(path = "../Data requirements/KE_business_registrations.xlsx") %>% 
+  janitor::clean_names() %>% 
+  select(year, adjusted) %>% 
+  filter(!is.na(adjusted)) %>% 
+  mutate(adjusted = round(adjusted)) %>% 
+  rename(business_reg = adjusted) %>% 
+  mutate(year = as.numeric(year))
+
+ke_business_reg
+```
+
+## KE Inflation Rates
+
+```{r}
+ke_inflation_rates <-
+read_excel(path = "../Data requirements/KE_inflation_rates.xls",
+           sheet = "2021") %>% 
+  select(Year, Value) %>% 
+  janitor::clean_names() %>% 
+  rename(inflation_rate = value)
+
+ke_inflation_rates
+```
+
+## KE Unemployment Rates
+
+```{r}
+ke_unemployment_rate <-
+read_excel(path = "../Data requirements/KE_unemployment_rates.xls", 
+           skip = 3) %>%
+  janitor::clean_names() %>% 
+  filter(country_name=="Kenya") %>% 
+  select(country_name, starts_with("x")) %>% 
+  pivot_longer(cols = starts_with("x"),
+               names_to = "year",
+               values_to = "unemployment_rate") %>% 
+  mutate(year = str_remove(string = year, pattern = "x")) %>% 
+  filter(!is.na(unemployment_rate)) %>% 
+  select(-country_name) %>% 
+  mutate(unemployment_rate = unemployment_rate/100)
+
+ke_unemployment_rate
+```
+
+## KE GDP Annual Growth
+
+```{r}
+ke_gdp <-
+read_excel(path = "../Data requirements/KE_gdp.xls",
+           sheet = "2021") %>% 
+  janitor::clean_names() %>% 
+  rename(gdp_growth = value) %>% 
+  mutate(gdp_growth = gdp_growth/100) %>% 
+  mutate(year = as.numeric(year))
+
+ke_gdp
+```
+
+# Business Registrations Forecast
+
+**Assumption:** Business registrations is a factor of National GDP.
+
+National GDP was chosen since it is the only one that has forecasted values.
+
+## ARIMAX model
+
+```{r}
+gdp_reg <-
+ke_business_reg %>%
+  full_join(ke_gdp, by = "year") %>%
+  arrange(year) %>% 
+  filter(!is.na(gdp_growth), !is.na(business_reg))
+
+gdp_reg
+```
+
+```{r}
+reg_model <- auto.arima(y = gdp_reg$business_reg, xreg = gdp_reg$gdp_growth)
+
+reg_model
+```
+
+## Forecasted values
+
+Forecast business registrations from 2022 to 2030. It is estimated that GDP will grow at 4.4% between 2020-2030.
+
+```{r}
+forecast(object = reg_model, 
+         h = 9, 
+         xreg = rep(0.044, times = 9)) %>% 
+  plot()
+
+
+reg_forecast <-
+forecast(object = reg_model, 
+         h = 9, 
+         xreg = rep(0.044, times = 9)) %>% 
+  as_tibble() %>% 
+  janitor::clean_names() %>% 
+  rename(business_reg = point_forecast) %>% 
+  mutate(year = 2022:2030) %>% 
+  bind_rows(ke_business_reg) %>% 
+  arrange(year) %>% 
+  relocate(year, .before = everything()) %>% 
+  mutate(business_reg = round(business_reg))
+
+reg_forecast
+```
+
+## CAGR
+
+```{r}
+CAGR_formula <- function(FV, PV, yrs) {
+cagr <- ((FV/PV)^(1/yrs)-1)
+return(cagr)
+}
+
+reg_cagr <- CAGR_formula(FV = 66120, PV = 46387, yrs = 2030-2022)
+reg_cagr <- scales::percent(reg_cagr, accuracy = 0.01)
+reg_cagr
+```
+
+## Plotted results
+
+```{r}
+reg_forecast %>% 
+  ggplot(aes(x = year, y = business_reg)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lo_95, ymax = hi_95, alpha = 0.3), 
+              fill = "grey70", 
+              show.legend = FALSE) +
+  scale_y_continuous(labels = scales::comma_format()) +
+  scale_x_continuous(breaks = seq(2000, 2030, 5), minor_breaks = NULL) +
+  expand_limits(y = 0, x = 2000) +
+  labs(title = "Growth of Business Registrations in Kenya [2002-2030]",
+       subtitle = glue::glue("Projected to grow at a CAGR of {reg_cagr} from 2022-2030"),
+       x = NULL,
+       y = "Number of Business Registrations")
+```
+
+# Save results
+
+```{r}
+save.image(file = "26_Oct.RData")
+```
+
+
+
+
+
