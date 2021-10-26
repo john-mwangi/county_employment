@@ -13,7 +13,7 @@ Time series model for determining number of job opportinities in Mombasa County
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-# Packages required
+# Packages
 
 ```{r message=FALSE, warning=FALSE}
 library(tidyverse)
@@ -46,7 +46,8 @@ read_excel(path = "../Data requirements/KE_inflation_rates.xls",
            sheet = "2021") %>% 
   select(Year, Value) %>% 
   janitor::clean_names() %>% 
-  rename(inflation_rate = value)
+  rename(inflation_rate = value) %>% 
+  mutate(year = as.numeric(year))
 
 ke_inflation_rates
 ```
@@ -66,7 +67,8 @@ read_excel(path = "../Data requirements/KE_unemployment_rates.xls",
   mutate(year = str_remove(string = year, pattern = "x")) %>% 
   filter(!is.na(unemployment_rate)) %>% 
   select(-country_name) %>% 
-  mutate(unemployment_rate = unemployment_rate/100)
+  mutate(unemployment_rate = unemployment_rate/100) %>% 
+  mutate(year = as.numeric(year))
 
 ke_unemployment_rate
 ```
@@ -167,10 +169,142 @@ reg_forecast %>%
        y = "Number of Business Registrations")
 ```
 
+# Unemployment Rate Forecast
+
+## ARIMAX model
+
+```{r}
+reg_forecast
+ke_gdp
+ke_inflation_rates
+ke_unemployment_rate
+
+unemp_data <-
+full_join(x = ke_gdp, y = reg_forecast, by = "year") %>% 
+  full_join(ke_inflation_rates, by = "year") %>% 
+  full_join(ke_unemployment_rate, by = "year") %>% 
+  arrange(year) %>% 
+  select(-starts_with(c("lo", "hi"))) %>% 
+  relocate(unemployment_rate, .after = year) %>% 
+  filter(complete.cases(.))
+
+unemp_data
+```
+
+
+```{r}
+unemp_data %>% 
+  select(-year, -unemployment_rate) %>% 
+  as.matrix()
+```
+
+
+```{r}
+unemp_model <-
+auto.arima(y = unemp_data$unemployment_rate, 
+           xreg = unemp_data %>%
+             select(-year, -unemployment_rate) %>%
+             as.matrix())
+
+unemp_model
+```
+
+## Forecasted values
+
+Forecast unemployment rates from 2021-2030
+
+```{r}
+unemp_newdata <-
+full_join(x = ke_gdp, y = reg_forecast, by = "year") %>% 
+  full_join(ke_inflation_rates, by = "year") %>% 
+  full_join(ke_unemployment_rate, by = "year") %>% 
+  arrange(year) %>% 
+  select(-starts_with(c("lo", "hi"))) %>% 
+  relocate(unemployment_rate, .after = year) %>% 
+  filter(year>=2021) %>% 
+  select(-year, -unemployment_rate) %>% 
+  as.matrix()
+
+unemp_newdata
+```
+
+```{r}
+forecast(object = unemp_model, h = 10, xreg = unemp_newdata) %>% plot()
+
+unemp_forecast <-
+forecast(object = unemp_model, h = 10, xreg = unemp_newdata) %>% 
+  as_tibble() %>% 
+  janitor::clean_names() %>% 
+  mutate(year = 2021:2030) %>% 
+  relocate(year, .before = everything()) %>% 
+  rename(unemployment_rate = point_forecast)
+
+unemp_forecast
+```
+
+
+```{r}
+unemp_complete <-
+full_join(x = ke_gdp, y = reg_forecast, by = "year") %>% 
+  full_join(ke_inflation_rates, by = "year") %>% 
+  full_join(ke_unemployment_rate, by = "year") %>% 
+  arrange(year) %>% 
+  select(-starts_with(c("lo", "hi"))) %>% 
+  relocate(unemployment_rate, .after = year) %>% 
+  left_join(unemp_forecast, by = "year") %>% 
+  mutate(unemployment_rate = coalesce(unemployment_rate.x, unemployment_rate.y)) %>% 
+  select(-unemployment_rate.x, -unemployment_rate.y) %>% 
+  select(-contains("80")) %>% 
+  arrange(year) %>% 
+  filter(year>=2002)
+
+unemp_complete
+```
+
+## Growth rate
+
+```{r}
+unemp_rates <-
+unemp_complete %>% 
+  filter(year>=2021) %>% 
+  pull(unemployment_rate)
+
+unemp_rates %>% 
+  mean() %>% 
+  scales::percent(accuracy = 0.01)
+
+scales::percent(unemp_rates[length(unemp_rates)] - unemp_rates[1], accuracy = 0.01)
+```
+
+## Plotted results
+
+```{r}
+unemp_complete %>% 
+  ggplot(aes(x = year, y = unemployment_rate)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lo_95, ymax = hi_95, alpha = 0.3), 
+              fill = "grey70", 
+              show.legend = FALSE) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_x_continuous(breaks = seq(2000, 2030, 5), minor_breaks = NULL) +
+  geom_text(aes(label = scales::percent(unemployment_rate, accuracy = 0.01)), 
+            check_overlap = TRUE) +
+  expand_limits(x = 2000) +
+  labs(title = "Unemployment Rates in Kenya [2002-2030]",
+       subtitle = "Unemployment is expected to reduce 2.68% in 2030",
+       x = NULL,
+       y = "Unemployment Rate")
+```
+
+
 # Save results
 
 ```{r}
 save.image(file = "26_Oct.RData")
+```
+
+```{r}
+load(file = "26_Oct.RData")
 ```
 
 
