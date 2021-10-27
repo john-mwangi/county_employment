@@ -24,6 +24,8 @@ library(tidyverse)
 library(readxl)
 library(forecast)
 library(writexl)
+
+theme_set(theme_light())
 ```
 
 # Data importation
@@ -89,6 +91,47 @@ read_excel(path = "../Data requirements/KE_gdp.xls",
   mutate(year = as.numeric(year))
 
 ke_gdp
+```
+
+## Mombasa Population
+
+Projections of Mombasa population until 2030. We'll use the UN population estimates as they are more recent but age group estimates from county sources. Assume age group sizes are changing at a constant rate.
+
+Ref:
+https://worldpopulationreview.com/world-cities/mombasa-population
+https://www.mombasa.go.ke/wp-content/uploads/2018/11/MSA-FINAL-CIDP-2018-22.pdf (page 12)
+
+```{r}
+msa_population <-
+read_csv(file = "../Data requirements/MSA_population.csv") %>% 
+  janitor::clean_names() %>% 
+  arrange(year) %>% 
+  mutate(yrs_15_64 = parse_number(yrs_15_64),
+         yrs_15_64 = yrs_15_64/100) %>% 
+  mutate(working_pop = round(yrs_15_64*population)) %>% 
+  select(-starts_with("x"))
+
+msa_population
+```
+
+## KE Unemployment Rates
+
+```{r}
+ke_unemployment_rate <-
+read_excel(path = "../Data requirements/KE_unemployment_rates.xls", 
+           skip = 3) %>%
+  janitor::clean_names() %>% 
+  filter(country_name=="Kenya") %>% 
+  select(country_name, starts_with("x")) %>% 
+  pivot_longer(cols = starts_with("x"),
+               names_to = "year",
+               values_to = "unemployment_rate") %>% 
+  mutate(year = str_remove(string = year, pattern = "x")) %>% 
+  filter(!is.na(unemployment_rate)) %>% 
+  select(-country_name) %>% 
+  mutate(unemployment_rate = unemployment_rate/100) %>% 
+  mutate(year = as.numeric(year))
+ke_unemployment_rate
 ```
 
 # Business Registrations Forecast
@@ -171,6 +214,124 @@ reg_forecast %>%
        subtitle = glue::glue("Projected to grow at a CAGR of {reg_cagr} from 2022-2030"),
        x = NULL,
        y = "Number of Business Registrations")
+```
+
+# Unemployment Rate Forecast
+
+## ARIMAX model
+
+```{r}
+reg_forecast
+ke_gdp
+ke_inflation_rates
+ke_unemployment_rate
+unemp_data <-
+full_join(x = ke_gdp, y = reg_forecast, by = "year") %>% 
+  full_join(ke_inflation_rates, by = "year") %>% 
+  full_join(ke_unemployment_rate, by = "year") %>% 
+  arrange(year) %>% 
+  select(-starts_with(c("lo", "hi"))) %>% 
+  relocate(unemployment_rate, .after = year) %>% 
+  filter(complete.cases(.))
+unemp_data
+```
+
+
+```{r}
+unemp_data %>% 
+  select(-year, -unemployment_rate) %>% 
+  as.matrix()
+```
+
+
+```{r}
+unemp_model <-
+auto.arima(y = unemp_data$unemployment_rate, 
+           xreg = unemp_data %>%
+             select(-year, -unemployment_rate) %>%
+             as.matrix())
+unemp_model
+```
+
+## Forecasted values
+
+Forecast unemployment rates from 2021-2030
+
+```{r}
+unemp_newdata <-
+full_join(x = ke_gdp, y = reg_forecast, by = "year") %>% 
+  full_join(ke_inflation_rates, by = "year") %>% 
+  full_join(ke_unemployment_rate, by = "year") %>% 
+  arrange(year) %>% 
+  select(-starts_with(c("lo", "hi"))) %>% 
+  relocate(unemployment_rate, .after = year) %>% 
+  filter(year>=2021) %>% 
+  select(-year, -unemployment_rate) %>% 
+  as.matrix()
+unemp_newdata
+```
+
+```{r}
+forecast(object = unemp_model, h = 10, xreg = unemp_newdata) %>% plot()
+unemp_forecast <-
+forecast(object = unemp_model, h = 10, xreg = unemp_newdata) %>% 
+  as_tibble() %>% 
+  janitor::clean_names() %>% 
+  mutate(year = 2021:2030) %>% 
+  relocate(year, .before = everything()) %>% 
+  rename(unemployment_rate = point_forecast)
+unemp_forecast
+```
+
+
+```{r}
+unemp_complete <-
+full_join(x = ke_gdp, y = reg_forecast, by = "year") %>% 
+  full_join(ke_inflation_rates, by = "year") %>% 
+  full_join(ke_unemployment_rate, by = "year") %>% 
+  arrange(year) %>% 
+  select(-starts_with(c("lo", "hi"))) %>% 
+  relocate(unemployment_rate, .after = year) %>% 
+  left_join(unemp_forecast, by = "year") %>% 
+  mutate(unemployment_rate = coalesce(unemployment_rate.x, unemployment_rate.y)) %>% 
+  select(-unemployment_rate.x, -unemployment_rate.y) %>% 
+  select(-contains("80")) %>% 
+  arrange(year) %>% 
+  filter(year>=2002)
+unemp_complete
+```
+
+## Growth rate
+
+```{r}
+unemp_rates <-
+unemp_complete %>% 
+  filter(year>=2021) %>% 
+  pull(unemployment_rate)
+unemp_rates %>% 
+  mean() %>% 
+  scales::percent(accuracy = 0.01)
+scales::percent(unemp_rates[length(unemp_rates)] - unemp_rates[1], accuracy = 0.01)
+```
+
+## Plotted results
+
+```{r}
+unemp_complete %>% 
+  ggplot(aes(x = year, y = unemployment_rate)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lo_95, ymax = hi_95, alpha = 0.3), 
+              fill = "grey70", 
+              show.legend = FALSE) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_x_continuous(breaks = seq(2000, 2030, 5), minor_breaks = NULL) +
+  geom_text(aes(label = scales::percent(unemployment_rate, accuracy = 0.01)), 
+            check_overlap = TRUE) +
+  expand_limits(x = 2000) +
+  labs(title = "Unemployment Rates in Kenya [2002-2030]",
+       subtitle = "Unemployment is expected to reduce 2.68% in 2030",
+       x = NULL,
+       y = "Unemployment Rate")
 ```
 
 # Employment Ratio Forecast
@@ -302,10 +463,72 @@ emp_complete %>%
        y = "Employment Ratio")
 ```
 
+# Job Opportunity Estimates
+
+## Projections
+
+According to KNBS, Employment Ratio is an estimate of the number of employed persons in a demographic. It is calculated as `Employed Population/Population (15-64)`. Estimates are total number of job opportunities (existing + new).
+
+```{r}
+job_opportunities <-
+emp_complete %>% 
+  left_join(msa_population, by = "year") %>% 
+  mutate(jobs_base = working_pop*employment_ratio,
+         jobs_best = working_pop*hi_95,
+         jobs_worst = working_pop*lo_95) %>% 
+  mutate(across(.cols = starts_with("jobs_"), .fns = round))
+
+job_opportunities
+```
+
+## Plotted results
+
+```{r}
+job_ops <-
+job_opportunities %>% 
+  filter(year>=2021) %>% 
+  pull(jobs_base)
+
+jobs_created <- job_ops[length(job_ops)] - job_ops[1]
+jobs_created <- scales::comma(jobs_created)
+jobs_created
+```
+
+
+```{r}
+jobs_plot <-
+job_opportunities %>% 
+  filter(year>=2010) %>% 
+  ggplot(aes(x = year, y = jobs_base)) +
+  geom_col(aes(x = year, y = working_pop), fill = "#53868B") +
+  geom_line() +
+  geom_ribbon(aes(ymin = jobs_worst, ymax = jobs_best, alpha = 0.3), 
+              fill = "grey70", 
+              show.legend = FALSE) +
+  scale_y_continuous(breaks = seq(0, 2000000, 250000), 
+                     minor_breaks = NULL, 
+                     labels = scales::comma_format()) +
+  scale_x_continuous(breaks = seq(2000, 2030, 5), minor_breaks = NULL) +
+  geom_text(aes(label = round(jobs_base/1000)), 
+            check_overlap = TRUE, 
+            size = 4) +
+  labs(title = "Job Opportunities in Mombasa County ('000)",
+       subtitle = glue::glue("{jobs_created} new jobs are expected to be created by 2030."),
+       x = NULL,
+       y = "Job Opportunities")
+
+#plotly::ggplotly(p = jobs_plot)
+jobs_plot
+```
+
+
 # Save results
 
 ```{r}
-write_xlsx(x = emp_complete, path = "./outputs/emp_complete.xlsx")
+write_xlsx(x = list(job_opportunities = job_opportunities,
+                    employment_ratios = emp_complete,
+                    unemployment_rates = unemp_complete), 
+           path = "./outputs/job_opportunities.xlsx")
 ```
 
 
