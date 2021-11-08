@@ -18,7 +18,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r message=FALSE, warning=FALSE}
 rm(list = ls())
 
-#load(file = "26_Oct.RData")
+load(file = "05_Nov.RData")
 
 library(tidyverse)
 library(readxl)
@@ -308,15 +308,20 @@ unemp_rates <-
 unemp_complete %>% 
   filter(year>=2021) %>% 
   pull(unemployment_rate)
+
 unemp_rates %>% 
   mean() %>% 
   scales::percent(accuracy = 0.01)
 scales::percent(unemp_rates[length(unemp_rates)] - unemp_rates[1], accuracy = 0.01)
+
+unemp_2030 <- scales::percent(unemp_rates[length(unemp_rates)], accuracy = 0.01)
+unemp_2030
 ```
 
 ## Plotted results
 
 ```{r}
+unemployment_plot <-
 unemp_complete %>% 
   ggplot(aes(x = year, y = unemployment_rate)) +
   geom_line() +
@@ -329,9 +334,11 @@ unemp_complete %>%
             check_overlap = TRUE) +
   expand_limits(x = 2000) +
   labs(title = "Unemployment Rates in Kenya [2002-2030]",
-       subtitle = "Unemployment is expected to reduce 2.68% in 2030",
+       subtitle = glue::glue("Unemployment is expected to reduce {unemp_2030} in 2030"),
        x = NULL,
        y = "Unemployment Rate")
+
+unemployment_plot
 ```
 
 # Employment Ratio Forecast
@@ -446,6 +453,7 @@ emp_2030
 ## Plotted results
 
 ```{r}
+employment_plot <-
 emp_complete %>% 
   ggplot(aes(x = year, y = employment_ratio)) +
   geom_line() +
@@ -461,7 +469,14 @@ emp_complete %>%
        subtitle = glue::glue("Employment is expected to reduce to {emp_2030} by 2030 from {emp_2020} in 2020"),
        x = NULL,
        y = "Employment Ratio")
+
+employment_plot
 ```
+
+```{r}
+employment_plot / unemployment_plot
+```
+
 
 # Job Opportunity Estimates
 
@@ -476,7 +491,9 @@ emp_complete %>%
   mutate(jobs_base = working_pop*employment_ratio,
          jobs_best = working_pop*hi_95,
          jobs_worst = working_pop*lo_95) %>% 
-  mutate(across(.cols = starts_with("jobs_"), .fns = round))
+  mutate(across(.cols = starts_with("jobs_"), .fns = round)) %>% 
+  rename(employment_ratio_lo_95 = lo_95,
+         employment_ratio_hi_95 = hi_95)
 
 job_opportunities
 ```
@@ -494,11 +511,12 @@ jobs_created <- scales::comma(jobs_created)
 jobs_created
 ```
 
+### Static chart
 
 ```{r}
-jobs_plot <-
 job_opportunities %>% 
   filter(year>=2010) %>% 
+  mutate(text = round(jobs_base/1e3)) %>% 
   ggplot(aes(x = year, y = jobs_base)) +
   geom_col(aes(x = year, y = working_pop), fill = "#53868B") +
   geom_line() +
@@ -509,16 +527,149 @@ job_opportunities %>%
                      minor_breaks = NULL, 
                      labels = scales::comma_format()) +
   scale_x_continuous(breaks = seq(2000, 2030, 5), minor_breaks = NULL) +
-  geom_text(aes(label = round(jobs_base/1000)), 
-            check_overlap = TRUE, 
-            size = 4) +
+  geom_text(aes(label = text), check_overlap = TRUE, size = 4) +
+  labs(title = "Job Opportunities in Mombasa County ('000)",
+       subtitle = glue::glue("{jobs_created} new jobs are expected to be created by 2030."),
+       x = NULL,
+       y = "Job Opportunities")
+```
+
+### Interactive chart
+
+```{r}
+jobs_plot <-
+job_opportunities %>% 
+  filter(year>=2010) %>% 
+  mutate(text = glue::glue("Jobs: {round(jobs_base/1e3,1)} K
+                           Pop 15-64 yrs: {round(working_pop/1e6,1)} M")) %>% 
+  ggplot(aes(x = year, y = jobs_base)) +
+  geom_col(aes(x = year, y = working_pop, text=text), fill = "#53868B") +
+  geom_line() +
+  geom_ribbon(aes(ymin = jobs_worst, ymax = jobs_best, alpha = 0.3), 
+              fill = "grey70", 
+              show.legend = FALSE) +
+  scale_y_continuous(breaks = seq(0, 2000000, 250000), 
+                     minor_breaks = NULL, 
+                     labels = scales::comma_format()) +
+  scale_x_continuous(breaks = seq(2000, 2030, 5), minor_breaks = NULL) +
+  #geom_text(aes(label = text), check_overlap = TRUE, size = 4) +
   labs(title = "Job Opportunities in Mombasa County ('000)",
        subtitle = glue::glue("{jobs_created} new jobs are expected to be created by 2030."),
        x = NULL,
        y = "Job Opportunities")
 
-#plotly::ggplotly(p = jobs_plot)
-jobs_plot
+plotly::ggplotly(p = jobs_plot, tooltip = "text")
+```
+
+### Table for display
+
+A breakdown of the job opportunities per sector, job category, organisation size, cluster.
+
+```{r}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+sector_ratios = read_excel(path = "./shiny_app/mombasa_jobs/job_opportunities.xlsx", sheet = "sector_ratios")
+org_size_ratios = read_excel(path = "./shiny_app/mombasa_jobs/job_opportunities.xlsx", sheet = "org_size_ratios")
+cluster_ratios = read_excel(path = "./shiny_app/mombasa_jobs/job_opportunities.xlsx", sheet = "cluster_ratios")
+job_category_ratios = read_excel(path = "./shiny_app/mombasa_jobs/job_opportunities.xlsx", sheet = "job_category_ratios")
+```
+
+We want to take all applicable ratios (filtered) and multiply them together to get a universal ratio, then multiply the jobs by this ratio.
+
+```{r}
+# Some basic selections
+clusters <- c("Creative", "Healthcare", "Hospitality & Tourism")
+
+job_categories_selected <-
+job_category_ratios %>% 
+  filter(cluster=="Creative") %>% 
+  slice_sample(n = 4) %>% 
+  pull(job_category)
+
+
+# Pulling out ratios
+cluster <-
+cluster_ratios %>% 
+  filter(cluster %in% clusters) %>% 
+  summarise(ratio = sum(ratio)) %>% 
+  pull(ratio)
+
+sector <-
+sector_ratios %>% 
+  filter(sector %in% c("Informal", "Formal")) %>% 
+  summarise(ratio = sum(ratio)) %>% 
+  pull(ratio)
+
+org_size <-
+org_size_ratios %>% 
+  filter(size %in% c("MSME")) %>% 
+  summarise(ratio = sum(ratio)) %>% 
+  pull(ratio)
+
+job_category <-
+job_category_ratios %>% 
+  filter(cluster=="Creative") %>% 
+  filter(job_category %in% job_categories_selected) %>% 
+  summarise(ratio = sum(ratio)) %>% 
+  pull(ratio)
+
+# Applying ratios
+multiplier = cluster*sector*org_size*cluster*job_category
+multiplier
+
+job_opportunities %>% 
+  select(year, jobs_base) %>% 
+  mutate(jobs_created = jobs_base*multiplier,
+         jobs_created = round(jobs_created))
+```
+
+
+```{r}
+job_opportunities %>%
+  mutate(jobs_formal = jobs_base * sector_ratios %>% filter(sector=="Formal") %>% pull(ratio),
+         jobs_formal = round(jobs_formal)) %>% 
+  mutate(jobs_informal = jobs_base * sector_ratios %>% filter(sector=="Informal") %>% pull(ratio),
+         jobs_informal = round(jobs_informal)) %>% 
+  select(year, jobs_formal, jobs_informal)
+
+job_opportunities %>% 
+  mutate(large_ent = jobs_base * org_size_ratios %>% filter(size=="Large") %>% pull(ratio),
+         large_ent = round(large_ent)) %>% 
+  mutate(msme_ent = jobs_base * org_size_ratios %>% filter(size=="MSME") %>% pull(ratio),
+         msme_ent = round(msme_ent)) %>% 
+  select(year, large_ent, msme_ent)
+```
+
+```{r}
+jobs_sector <- function(job_opportunities, sector_ratios){
+  job_opportunities %>%
+  mutate(jobs_formal = jobs_base * sector_ratios %>% filter(sector=="Formal") %>% pull(ratio),
+         jobs_formal = round(jobs_formal)) %>% 
+  mutate(jobs_informal = jobs_base * sector_ratios %>% filter(sector=="Informal") %>% pull(ratio),
+         jobs_informal = round(jobs_informal)) %>% 
+  select(year, jobs_formal, jobs_informal)
+}
+
+
+jobs_ent <- function(job_opportunities, org_size_ratios){
+  job_opportunities %>% 
+  mutate(large_ent = jobs_base * org_size_ratios %>% filter(size=="Large") %>% pull(ratio),
+         large_ent = round(large_ent)) %>% 
+  mutate(msme_ent = jobs_base * org_size_ratios %>% filter(size=="MSME") %>% pull(ratio),
+         msme_ent = round(msme_ent)) %>% 
+  select(year, large_ent, msme_ent)
+}
+
+jobs_sector(job_opportunities = job_opportunities, sector_ratios = sector_ratios)
+jobs_ent(job_opportunities = job_opportunities, org_size_ratios = org_size_ratios)
+```
+
+### Formal jobs
+
+```{r}
+job_opportunities %>%
+  filter(year>=2010, year<=2030) %>% 
+  mutate(jobs_created)
 ```
 
 
@@ -533,7 +684,7 @@ write_xlsx(x = list(job_opportunities = job_opportunities,
 
 
 ```{r}
-save.image(file = "27_Oct.RData")
+save.image(file = "05_Nov.RData")
 ```
 
 
